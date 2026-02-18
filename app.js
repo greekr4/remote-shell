@@ -123,7 +123,10 @@ const buildWsUrl = (req, sessionId) => {
 };
 
 const runPowerShell = (command) => new Promise((resolve) => {
-  const child = spawn('powershell.exe', ['-NoProfile', '-Command', command], {
+  const safeCommand = String(command || '');
+  const runCommand = `$ProgressPreference = 'SilentlyContinue'; $OutputEncoding = [System.Text.UTF8Encoding]::new(); [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new(); [Console]::InputEncoding = [System.Text.UTF8Encoding]::new(); ${safeCommand}`;
+
+  const child = spawn('powershell.exe', ['-NoProfile', '-Command', runCommand], {
     windowsHide: true,
     cwd: process.cwd(),
     env: process.env
