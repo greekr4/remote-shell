@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <title>Remote Shell Live UI</title>
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <main class="wrap">
+    <section class="top">
+      <h1>Remote shell</h1>
+    </section>
+
+    <section class="terminal">
+      <div class="row-head">
+        <strong>Live Terminal</strong>
+        <span id="terminalUrl"></span>
+      </div>
+      <iframe id="terminalFrame" title="Live terminal"></iframe>
+    </section>
+
+    <section class="quick">
+      <div class="row-head">
+        <strong>Quick Commands</strong>
+        <button id="addQuick" class="btn mini" type="button">Add</button>
+      </div>
+      <div id="quickGrid" class="grid"></div>
+      <p id="quickEmpty" class="status">No quick commands yet. Tap Add.</p>
+      <p id="quickStatus" class="status"></p>
+    </section>
+  </main>
+
+  <div id="quickModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="modalTitle">
+    <div class="modal-card">
+      <div class="row-head">
+        <strong id="modalTitle">Add Quick Command</strong>
+        <button id="closeModal" class="btn ghost mini" type="button">Close</button>
+      </div>
+      <form id="quickForm" class="form">
+        <label for="quickLabel">Label</label>
+        <input id="quickLabel" name="quickLabel" type="text" maxlength="40" placeholder="Git Status" required />
+        <label for="quickCommand">Command</label>
+        <textarea id="quickCommand" name="quickCommand" rows="3" placeholder="git status --short" required></textarea>
+        <button class="btn" type="submit">Save</button>
+      </form>
+    </div>
+  </div>
+
+  <script src="/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,218 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <title>Live Terminal</title>
+    <style>
+      :root {
+        --bg: #04111a;
+        --card: #0d2a3d;
+        --line: #2f5a74;
+        --text: #d9f1ff;
+        --muted: #9ec1dc;
+        --mint: #43d9be;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      html,
+      body {
+        margin: 0;
+        min-height: 100%;
+        background: #04111a;
+        color: var(--text);
+      }
+
+      body {
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+        padding: 8px;
+        font-family: "IBM Plex Mono", "Consolas", "SFMono-Regular", Menlo, Monaco, monospace;
+      }
+
+      #status {
+        font-size: 12px;
+        color: var(--muted);
+        min-height: 18px;
+      }
+
+      #screen {
+        flex: 1;
+        margin: 0;
+        padding: 10px;
+        background: #061f30;
+        border: 1px solid var(--line);
+        border-radius: 12px;
+        color: var(--text);
+        line-height: 1.25;
+        overflow: auto;
+        white-space: pre-wrap;
+        word-break: break-word;
+      }
+
+      #inputBar {
+        display: flex;
+        gap: 8px;
+      }
+
+      #commandInput {
+        flex: 1;
+        min-height: 40px;
+        border: 1px solid var(--line);
+        border-radius: 10px;
+        background: #071f30;
+        color: var(--text);
+        padding: 10px;
+        font-size: 16px;
+      }
+
+      #sendBtn {
+        min-height: 40px;
+        border: 0;
+        border-radius: 10px;
+        padding: 0 12px;
+        background: var(--mint);
+        color: #06252f;
+        font-weight: 700;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="status">Connecting terminal...</div>
+    <pre id="screen" aria-live="polite"></pre>
+    <form id="inputBar">
+      <input
+        id="commandInput"
+        type="text"
+        autocomplete="off"
+        autocorrect="off"
+        autocapitalize="off"
+        spellcheck="false"
+        inputmode="text"
+        placeholder="Type command"
+      />
+      <button id="sendBtn" type="submit">Send</button>
+    </form>
+
+    <script>
+      (() => {
+        const params = new URLSearchParams(window.location.search);
+        const sid = params.get('sid');
+
+        if (!sid) {
+          document.getElementById('status').textContent = 'Session id is missing.';
+          return;
+        }
+
+        const statusEl = document.getElementById('status');
+        const screen = document.getElementById('screen');
+        const commandInput = document.getElementById('commandInput');
+        const form = document.getElementById('inputBar');
+
+        const protocol = window.location.protocol === 'https:' ? 'wss' : 'ws';
+        const socketUrl = `${protocol}://${window.location.host}/terminal-socket?sid=${encodeURIComponent(sid)}`;
+        const MAX_BUFFER_CHARS = 300000;
+
+        let socket;
+        const pending = [];
+
+        const trimBuffer = () => {
+          if (screen.textContent.length > MAX_BUFFER_CHARS) {
+            screen.textContent = screen.textContent.slice(-MAX_BUFFER_CHARS);
+          }
+        };
+
+        const writeOutput = (text) => {
+          if (!text) {
+            return;
+          }
+          screen.textContent += text;
+          trimBuffer();
+          screen.scrollTop = screen.scrollHeight;
+        };
+
+        const connect = () => {
+          socket = new WebSocket(socketUrl);
+
+          socket.addEventListener('open', () => {
+            statusEl.textContent = 'Connected';
+            window.parent.postMessage({ type: 'terminal-ready', sid }, window.location.origin);
+            window.parent.postMessage({ type: 'terminal-session', sessionId: sid }, window.location.origin);
+            if (pending.length > 0) {
+              const queue = pending.splice(0, pending.length);
+              queue.forEach((item) => {
+                socket.send(JSON.stringify({ type: 'input', data: item }));
+              });
+            }
+          });
+
+          socket.addEventListener('message', (event) => {
+            try {
+              const parsed = JSON.parse(event.data);
+              if (parsed.type === 'output') {
+                writeOutput(parsed.data);
+                return;
+              }
+              if (parsed.type === 'ready') {
+                statusEl.textContent = `Connected (${parsed.sessionId})`;
+              }
+            } catch {
+              writeOutput(String(event.data));
+            }
+          });
+
+          socket.addEventListener('close', () => {
+            statusEl.textContent = 'Disconnected. Trying reconnect...';
+            window.setTimeout(connect, 1200);
+          });
+
+          socket.addEventListener('error', () => {
+            statusEl.textContent = 'Connection error.';
+          });
+        };
+
+        const sendCommand = (text) => {
+          const payload = String(text || '');
+          if (!payload) {
+            return;
+          }
+
+          if (!socket || socket.readyState !== WebSocket.OPEN) {
+            pending.push(payload);
+            return;
+          }
+
+          socket.send(JSON.stringify({ type: 'input', data: payload }));
+        };
+
+        const estimateDimensions = () => {
+          const cols = Math.max(60, Math.floor((window.innerWidth - 42) / 8));
+          const rows = Math.max(12, Math.floor((window.innerHeight - 130) / 18));
+
+          if (socket && socket.readyState === WebSocket.OPEN) {
+            socket.send(JSON.stringify({ type: 'resize', cols, rows }));
+          }
+        };
+
+        window.addEventListener('resize', estimateDimensions);
+        form.addEventListener('submit', (event) => {
+          event.preventDefault();
+          const value = commandInput.value.trim();
+          if (!value) {
+            return;
+          }
+
+          commandInput.value = '';
+          sendCommand(`${value}\r`);
+        });
+
+        connect();
+        estimateDimensions();
+      })();
+    </script>
+  </body>
+</html>

@@ -1,0 +1,19 @@
+{
+  "name": "remote-shell",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Mobile-first command launcher UI for remote shell",
+  "main": "app.js",
+  "scripts": {
+    "start": "node app.js",
+    "dev": "node app.js"
+  },
+  "dependencies": {
+    "express": "^4.21.2",
+    "node-pty": "^1.1.0",
+    "ws": "^8.18.1"
+  },
+  "devDependencies": {
+    "playwright": "^1.58.2"
+  }
+}
