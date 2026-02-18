@@ -102,6 +102,10 @@
       (() => {
         const params = new URLSearchParams(window.location.search);
         const sid = params.get('sid');
+        const MAX_BUFFER_CHARS = 300000;
+        const RECONNECT_BASE_MS = 700;
+        const RECONNECT_MAX_MS = 5000;
+        const PING_INTERVAL_MS = 15000;
 
         if (!sid) {
           document.getElementById('status').textContent = 'Session id is missing.';
@@ -112,12 +116,14 @@
         const screen = document.getElementById('screen');
         const commandInput = document.getElementById('commandInput');
         const form = document.getElementById('inputBar');
-
         const protocol = window.location.protocol === 'https:' ? 'wss' : 'ws';
         const socketUrl = `${protocol}://${window.location.host}/terminal-socket?sid=${encodeURIComponent(sid)}`;
-        const MAX_BUFFER_CHARS = 300000;
 
-        let socket;
+        let socket = null;
+        let reconnectDelay = RECONNECT_BASE_MS;
+        let reconnectTimer = null;
+        let heartbeatTimer = null;
+        let shouldRun = true;
         const pending = [];
 
         const trimBuffer = () => {
@@ -135,44 +141,15 @@
           screen.scrollTop = screen.scrollHeight;
         };
 
-        const connect = () => {
-          socket = new WebSocket(socketUrl);
+        const flushPending = () => {
+          if (!socket || socket.readyState !== WebSocket.OPEN) {
+            return;
+          }
 
-          socket.addEventListener('open', () => {
-            statusEl.textContent = 'Connected';
-            window.parent.postMessage({ type: 'terminal-ready', sid }, window.location.origin);
-            window.parent.postMessage({ type: 'terminal-session', sessionId: sid }, window.location.origin);
-            if (pending.length > 0) {
-              const queue = pending.splice(0, pending.length);
-              queue.forEach((item) => {
-                socket.send(JSON.stringify({ type: 'input', data: item }));
-              });
-            }
-          });
-
-          socket.addEventListener('message', (event) => {
-            try {
-              const parsed = JSON.parse(event.data);
-              if (parsed.type === 'output') {
-                writeOutput(parsed.data);
-                return;
-              }
-              if (parsed.type === 'ready') {
-                statusEl.textContent = `Connected (${parsed.sessionId})`;
-              }
-            } catch {
-              writeOutput(String(event.data));
-            }
-          });
-
-          socket.addEventListener('close', () => {
-            statusEl.textContent = 'Disconnected. Trying reconnect...';
-            window.setTimeout(connect, 1200);
-          });
-
-          socket.addEventListener('error', () => {
-            statusEl.textContent = 'Connection error.';
-          });
+          while (pending.length > 0) {
+            const payload = pending.shift();
+            socket.send(JSON.stringify({ type: 'input', data: payload }));
+          }
         };
 
         const sendCommand = (text) => {
@@ -189,16 +166,93 @@
           socket.send(JSON.stringify({ type: 'input', data: payload }));
         };
 
-        const estimateDimensions = () => {
+        const sendResize = () => {
+          if (!socket || socket.readyState !== WebSocket.OPEN) {
+            return;
+          }
+
           const cols = Math.max(60, Math.floor((window.innerWidth - 42) / 8));
           const rows = Math.max(12, Math.floor((window.innerHeight - 130) / 18));
-
-          if (socket && socket.readyState === WebSocket.OPEN) {
-            socket.send(JSON.stringify({ type: 'resize', cols, rows }));
-          }
+          socket.send(JSON.stringify({ type: 'resize', cols, rows }));
         };
 
-        window.addEventListener('resize', estimateDimensions);
+        const scheduleReconnect = () => {
+          if (!shouldRun || reconnectTimer) {
+            return;
+          }
+
+          reconnectTimer = window.setTimeout(() => {
+            reconnectTimer = null;
+            connect();
+          }, reconnectDelay);
+          reconnectDelay = Math.min(RECONNECT_MAX_MS, reconnectDelay * 2);
+        };
+
+        const connect = () => {
+          if (!shouldRun) {
+            return;
+          }
+
+          if (socket && (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING)) {
+            return;
+          }
+
+          socket = new WebSocket(socketUrl);
+          statusEl.textContent = 'Connecting...';
+
+          if (heartbeatTimer) {
+            window.clearInterval(heartbeatTimer);
+            heartbeatTimer = null;
+          }
+
+          socket.addEventListener('open', () => {
+            reconnectDelay = RECONNECT_BASE_MS;
+            statusEl.textContent = 'Connected';
+            window.parent.postMessage({ type: 'terminal-ready', sid }, window.location.origin);
+            window.parent.postMessage({ type: 'terminal-session', sessionId: sid }, window.location.origin);
+            flushPending();
+            sendResize();
+            heartbeatTimer = window.setInterval(() => {
+              if (socket && socket.readyState === WebSocket.OPEN) {
+                socket.send(JSON.stringify({ type: 'ping' }));
+              }
+            }, PING_INTERVAL_MS);
+          });
+
+          socket.addEventListener('message', (event) => {
+            try {
+              const parsed = JSON.parse(event.data);
+              if (parsed.type === 'output') {
+                writeOutput(parsed.data);
+                return;
+              }
+              if (parsed.type === 'ready') {
+                statusEl.textContent = `Connected (${parsed.sessionId})`;
+              }
+              if (parsed.type === 'pong') {
+                return;
+              }
+            } catch {
+              writeOutput(String(event.data));
+            }
+          });
+
+          socket.addEventListener('close', () => {
+            if (heartbeatTimer) {
+              window.clearInterval(heartbeatTimer);
+              heartbeatTimer = null;
+            }
+
+            statusEl.textContent = 'Disconnected. Reconnecting...';
+            reconnectTimer = null;
+            scheduleReconnect();
+          });
+
+          socket.addEventListener('error', () => {
+            statusEl.textContent = 'Connection error.';
+          });
+        };
+
         form.addEventListener('submit', (event) => {
           event.preventDefault();
           const value = commandInput.value.trim();
@@ -210,8 +264,33 @@
           sendCommand(`${value}\r`);
         });
 
+        window.addEventListener('resize', sendResize);
+        window.addEventListener('message', (event) => {
+          if (event.origin !== window.location.origin) {
+            return;
+          }
+
+          const data = event.data;
+          if (!data || typeof data !== 'object') {
+            return;
+          }
+
+          if (data.type === 'run-command') {
+            sendCommand(`${String(data.command || '').replace(/\r/g, '')}\r`);
+          }
+        });
+        window.addEventListener('beforeunload', () => {
+          shouldRun = false;
+          if (socket && socket.readyState === WebSocket.OPEN) {
+            socket.close(1000, 'page-unload');
+          }
+          if (heartbeatTimer) {
+            window.clearInterval(heartbeatTimer);
+          }
+        });
+
         connect();
-        estimateDimensions();
+        sendResize();
       })();
     </script>
   </body>

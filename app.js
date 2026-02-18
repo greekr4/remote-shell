@@ -11,10 +11,11 @@ const RUN_TIMEOUT_MS = Number(process.env.RUN_TIMEOUT_MS || 15000);
 const MAX_OUTPUT_CHARS = Number(process.env.MAX_OUTPUT_CHARS || 12000);
 const ALLOW_CUSTOM = process.env.ALLOW_CUSTOM === 'true';
 
-const TERMINAL_SESSION_TTL_MS = Number(process.env.TERMINAL_SESSION_TTL_MS || 1800000);
-const TERMINAL_CLEANUP_INTERVAL_MS = Number(process.env.TERMINAL_CLEANUP_INTERVAL_MS || 15000);
+const TERMINAL_SESSION_TTL_MS = Number(process.env.TERMINAL_SESSION_TTL_MS || 43200000);
+const TERMINAL_CLEANUP_INTERVAL_MS = Number(process.env.TERMINAL_CLEANUP_INTERVAL_MS || 20000);
 const TERMINAL_DEFAULT_COLS = Number(process.env.TERMINAL_DEFAULT_COLS || 120);
 const TERMINAL_DEFAULT_ROWS = Number(process.env.TERMINAL_DEFAULT_ROWS || 36);
+const TERMINAL_HEARTBEAT_INTERVAL_MS = Number(process.env.TERMINAL_HEARTBEAT_INTERVAL_MS || 15000);
 
 const ALLOWED_SESSION_ID = /^[0-9a-fA-F-]{8,}$/;
 
@@ -39,9 +40,31 @@ const PRESET_COMMANDS = [
 
 const isWindows = process.platform === 'win32';
 const SHELL = isWindows ? 'powershell.exe' : (process.env.SHELL || 'bash');
-const SHELL_ARGS = isWindows ? ['-NoLogo', '-NoExit'] : ['-i'];
+const SHELL_ARGS = isWindows
+  ? [
+      '-NoProfile',
+      '-NoLogo',
+      '-NoExit',
+      '-Command',
+      'chcp 65001 > $null; $OutputEncoding = New-Object System.Text.UTF8Encoding($false); [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false); [Console]::InputEncoding = New-Object System.Text.UTF8Encoding($false);'
+    ]
+  : ['-i'];
 
 const terminalSessions = new Map();
+
+const touchSession = (session) => {
+  const now = Date.now();
+  session.lastActiveAt = now;
+  session.lastHeartbeatAt = now;
+};
+
+const buildShellEnv = () => ({
+  ...process.env,
+  LANG: process.env.LANG || 'en_US.UTF-8',
+  LC_ALL: process.env.LC_ALL || 'en_US.UTF-8',
+  PYTHONIOENCODING: process.env.PYTHONIOENCODING || 'utf-8',
+  TERM: 'xterm-256color'
+});
 
 const trimOutput = (text) => {
   if (!text) {
@@ -60,7 +83,7 @@ const createShellSession = (sessionId) => {
     cols: TERMINAL_DEFAULT_COLS,
     rows: TERMINAL_DEFAULT_ROWS,
     cwd: process.cwd(),
-    env: process.env
+    env: buildShellEnv()
   });
 
   const now = Date.now();
@@ -69,13 +92,14 @@ const createShellSession = (sessionId) => {
     ptyProcess,
     createdAt: now,
     lastActiveAt: now,
+    lastHeartbeatAt: now,
     clients: new Set(),
     cols: TERMINAL_DEFAULT_COLS,
     rows: TERMINAL_DEFAULT_ROWS
   };
 
   ptyProcess.onData((data) => {
-    session.lastActiveAt = Date.now();
+    touchSession(session);
     const message = JSON.stringify({ type: 'output', data });
     session.clients.forEach((client) => {
       if (client.readyState === WebSocket.OPEN) {
@@ -107,7 +131,7 @@ const getOrCreateSession = (sessionId) => {
   if (isValidSessionId(sessionId)) {
     const existing = terminalSessions.get(sessionId);
     if (existing) {
-      existing.lastActiveAt = Date.now();
+      touchSession(existing);
       return existing;
     }
   }
@@ -228,6 +252,25 @@ appServer.post('/api/terminal/session', (req, res) => {
   });
 });
 
+appServer.post('/api/terminal/session/heartbeat', (req, res) => {
+  const sessionId = req.body && typeof req.body.sessionId === 'string' ? req.body.sessionId.trim() : null;
+  if (!isValidSessionId(sessionId)) {
+    return res.status(400).json({ message: 'Invalid session id.' });
+  }
+
+  const session = terminalSessions.get(sessionId);
+  if (!session) {
+    return res.status(404).json({ message: 'Session not found.' });
+  }
+
+  touchSession(session);
+  return res.json({
+    ok: true,
+    sessionId: session.id,
+    ttlMs: TERMINAL_SESSION_TTL_MS
+  });
+});
+
 appServer.get('/terminal-view', (req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'terminal-view.html'));
 });
@@ -245,10 +288,11 @@ wss.on('connection', (ws, req) => {
   }
 
   session.clients.add(ws);
-  session.lastActiveAt = Date.now();
+  touchSession(session);
   ws.send(JSON.stringify({ type: 'ready', sessionId: session.id }));
 
   const handleMessage = (payload) => {
+    touchSession(session);
     if (typeof payload !== 'object' || payload === null) {
       session.ptyProcess.write(String(payload || ''));
       return;
@@ -294,7 +338,7 @@ wss.on('connection', (ws, req) => {
   });
 
   ws.on('close', () => {
-    session.lastActiveAt = Date.now();
+    touchSession(session);
     session.clients.delete(ws);
   });
 });
@@ -306,7 +350,8 @@ const cleanupTerminalSessions = () => {
       return;
     }
 
-    if ((now - session.lastActiveAt) < TERMINAL_SESSION_TTL_MS) {
+    const lastSeen = session.lastHeartbeatAt || session.lastActiveAt;
+    if ((now - lastSeen) < TERMINAL_SESSION_TTL_MS) {
       return;
     }
 
@@ -343,6 +388,24 @@ server.on('upgrade', (req, socket, head) => {
 });
 
 setInterval(cleanupTerminalSessions, TERMINAL_CLEANUP_INTERVAL_MS);
+
+setInterval(() => {
+  terminalSessions.forEach((session) => {
+    if (session.clients.size === 0) {
+      return;
+    }
+    try {
+      const payload = JSON.stringify({ type: 'ping', data: Date.now() });
+      session.clients.forEach((client) => {
+        if (client.readyState === WebSocket.OPEN) {
+          client.send(payload);
+        }
+      });
+    } catch {
+      // ignore
+    }
+  });
+}, TERMINAL_HEARTBEAT_INTERVAL_MS);
 
 process.on('SIGINT', () => {
   terminalSessions.forEach((session) => {

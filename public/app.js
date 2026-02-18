@@ -1,5 +1,6 @@
 const QUICK_STORAGE_KEY = 'remote-shell.quick-commands.v1';
 const SESSION_STORAGE_KEY = 'remote-shell.terminal-session.v1';
+const SESSION_HEARTBEAT_MS = 25000;
 
 const el = {
   terminalFrame: document.getElementById('terminalFrame'),
@@ -67,6 +68,7 @@ let terminalReady = false;
 let isEnsuringSession = false;
 let pendingCommands = [];
 let isImeComposing = false;
+let heartbeatTimer = null;
 
 const updateTerminalMeta = (stateText) => {
   if (!terminalSessionId) {
@@ -110,11 +112,14 @@ const setTerminalFrame = (sessionId) => {
   terminalSessionId = sessionId;
   if (!sessionId) {
     el.terminalUrl.textContent = 'Live terminal session unavailable';
+    stopSessionHeartbeat();
     return;
   }
   terminalReady = false;
   updateTerminalMeta('connecting');
   el.terminalFrame.src = buildTerminalUrl(sessionId);
+  saveSessionId(sessionId);
+  startSessionHeartbeat();
 };
 
 const runCommand = (item) => {
@@ -204,6 +209,49 @@ const sendTextToTerminal = (text) => {
   }
 };
 
+const stopSessionHeartbeat = () => {
+  if (heartbeatTimer) {
+    window.clearInterval(heartbeatTimer);
+    heartbeatTimer = null;
+  }
+};
+
+const startSessionHeartbeat = () => {
+  stopSessionHeartbeat();
+  if (!terminalSessionId) {
+    return;
+  }
+
+  const tick = async () => {
+    try {
+      const response = await fetch('/api/terminal/session/heartbeat', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({ sessionId: terminalSessionId })
+      });
+
+      if (response.status === 404) {
+        stopSessionHeartbeat();
+        saveSessionId(null);
+        terminalSessionId = null;
+        ensureSession();
+        return;
+      }
+
+      if (!response.ok) {
+        throw new Error(`Heartbeat failed (${response.status})`);
+      }
+    } catch (error) {
+      setStatus(`Session keep-alive error: ${String(error.message || error)}`);
+    }
+  };
+
+  heartbeatTimer = window.setInterval(tick, SESSION_HEARTBEAT_MS);
+  tick();
+};
+
 const ensureSession = async () => {
   if (isEnsuringSession) {
     return;
@@ -241,6 +289,7 @@ const ensureSession = async () => {
     setStatus(`Session error: ${String(error.message || error)}`);
     updateTerminalMeta('offline');
     saveSessionId(null);
+    stopSessionHeartbeat();
     terminalSessionId = null;
   } finally {
     isEnsuringSession = false;
@@ -298,6 +347,7 @@ const init = () => {
       saveSessionId(event.data.sessionId);
       terminalSessionId = event.data.sessionId;
       updateTerminalMeta('connected');
+      startSessionHeartbeat();
       return;
     }
   });
@@ -310,6 +360,10 @@ const init = () => {
   window.addEventListener('online', () => {
     setStatus('Network restored. Reconnecting session...');
     ensureSession();
+  });
+
+  window.addEventListener('beforeunload', () => {
+    stopSessionHeartbeat();
   });
 
   el.addQuick.addEventListener('click', openModal);
